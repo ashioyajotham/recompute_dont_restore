@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+dist/
+build/
+*.egg
+*.so
+
+# Profiler output
+/tmp/xprof*/
+*.pb
+
+# Benchmark results (pre-generated results are committed, new runs are not)
+05_benchmarks/results/*.json
+05_benchmarks/results/*.png
+
+# JAX cache
+.jax_cache/
+jax_cache/
