@@ -115,3 +115,9 @@ The JAX reference implementation at `jax/experimental/pallas/ops/tpu/flash_atten
 3. Shazeer (2019). Fast Transformer Decoding: One Write-Head is All You Need.
 4. Ainslie et al. (2023). GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints.
 5. JAX Pallas documentation: https://jax.readthedocs.io/en/latest/pallas/
+
+---
+
+## Acknowledgement
+
+Google Cloud credits are provided for this project. #TPUSprint

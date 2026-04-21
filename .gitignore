@@ -19,3 +19,11 @@ build/
 # JAX cache
 .jax_cache/
 jax_cache/
+
+# Agent / tool state
+.claude/
+.cursor/
+
+# Local venv
+.venv/
+venv/
