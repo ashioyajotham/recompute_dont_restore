@@ -9,8 +9,8 @@
   at the three story notebooks.
 
   The TPU-gated tests (tests/test_flash_attention.py and the Pallas
-  half of tests/test_gqa.py) auto-skip on CPU — run those on Colab
-  via run_colab.sh.
+  half of tests/test_gqa.py) auto-skip on CPU. Run those on Colab via
+  run_colab.sh.
 
 .PARAMETER SkipInstall
   Reuse an existing .venv without reinstalling dependencies.
@@ -26,6 +26,11 @@
   ./run_local.ps1
   ./run_local.ps1 -SkipInstall
   ./run_local.ps1 -Baseline -SkipNotebooks
+
+.NOTES
+  This file is pure ASCII on purpose: Windows PowerShell 5.1 reads .ps1
+  files as Windows-1252 unless they have a UTF-8 BOM, so embedded
+  Unicode (em-dashes, smart quotes) breaks the parser.
 #>
 
 [CmdletBinding()]
@@ -58,8 +63,8 @@ if (-not (Test-Path ".venv")) {
 
 if (-not $SkipInstall) {
     python -m pip install --upgrade pip | Out-Null
-    # requirements.txt pins jax[tpu] which has no Windows wheel; install CPU
-    # JAX directly instead. The rest of the deps are portable.
+    # requirements.txt pins jax[tpu] which has no Windows wheel; install
+    # CPU JAX directly instead. The rest of the deps are portable.
     pip install "jax[cpu]" "jaxlib" "numpy>=1.24" "matplotlib>=3.7" pytest jupyter
 }
 
@@ -70,51 +75,21 @@ python -c "import jax; print('JAX', jax.__version__, '->', jax.devices())"
 # ---------------------------------------------------------------------------
 Section "2. CPU-safe tests (TPU tests auto-skip)"
 
-# Everything under tests/ — @pytest.mark.tpu tests are skipped by conftest.
+# Everything under tests/. @pytest.mark.tpu tests are skipped by conftest.
 pytest -v
 
 # ---------------------------------------------------------------------------
-# 3. Smoke test: naive kernel vs a hand-rolled NumPy reference
+# 3. Smoke test: naive kernel forward + gradients
 # ---------------------------------------------------------------------------
 Section "3. Smoke test: naive attention forward pass"
 
-$smokeTest = @'
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path.cwd() / "02_naive_jax_baseline"))
-
-import jax
-import jax.numpy as jnp
-import numpy as np
-from standard_attention import attention
-
-key = jax.random.PRNGKey(0)
-k1, k2, k3 = jax.random.split(key, 3)
-shape = (1, 2, 256, 128)
-q = jax.random.normal(k1, shape, dtype=jnp.bfloat16)
-k = jax.random.normal(k2, shape, dtype=jnp.bfloat16)
-v = jax.random.normal(k3, shape, dtype=jnp.bfloat16)
-
-out = attention(q, k, v)
-print(f"output shape: {out.shape}, dtype: {out.dtype}")
-arr = np.asarray(out, dtype=np.float32)
-assert np.all(np.isfinite(arr)), "non-finite values in output"
-print(f"output summary: min={arr.min():.4f} max={arr.max():.4f} mean={arr.mean():.4f}")
-
-grads = jax.grad(lambda q, k, v: attention(q, k, v).sum(), argnums=(0, 1, 2))(q, k, v)
-for name, g in zip(("dq", "dk", "dv"), grads):
-    ok = np.all(np.isfinite(np.asarray(g)))
-    print(f"{name}: shape={g.shape} finite={ok}")
-
-print("OK: naive forward + gradients sane.")
-'@
-$smokeTest | python -
+python scripts\local_smoke_test.py
 
 # ---------------------------------------------------------------------------
 # 4. Optional: naive baseline sequence-length sweep
 # ---------------------------------------------------------------------------
 if ($Baseline) {
-    Section "4. Naive baseline sweep (CPU — can be slow)"
+    Section "4. Naive baseline sweep (CPU, can be slow)"
     python 02_naive_jax_baseline\benchmark_baseline.py --plot `
         --out 05_benchmarks\results\baseline_cpu.json
     Write-Host "Results -> 05_benchmarks\results\baseline_cpu.*" -ForegroundColor Green

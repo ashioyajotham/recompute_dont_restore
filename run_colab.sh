@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ----------------------------------------------------------------------------
-# Recompute, Don't Store — Colab TPU quick start.
+# Recompute, Don't Store -- Colab TPU quick start.
 #
 # Usage (paste into a cell on a TPU Colab runtime):
 #     !git clone https://github.com/ashioyajotham/recompute_dont_restore.git
