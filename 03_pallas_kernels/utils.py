@@ -148,9 +148,13 @@ def validate_shapes(
             f"Standard head dims: 64 is not supported; use 128 or 256."
         )
 
-    allowed_dtypes = {jnp.bfloat16, jnp.float16}
+    # Normalize through jnp.dtype on both sides: arr.dtype is a numpy dtype
+    # *instance* whereas jnp.bfloat16 is a scalar metaclass; they satisfy
+    # __eq__ but not set membership (different hashes), so the original
+    # `arr.dtype in {jnp.bfloat16, ...}` check was a false negative.
+    allowed_dtypes = {jnp.dtype(jnp.bfloat16), jnp.dtype(jnp.float16)}
     for name, arr in [("q", q), ("k", k), ("v", v)]:
-        if arr.dtype not in allowed_dtypes:
+        if jnp.dtype(arr.dtype) not in allowed_dtypes:
             raise ValueError(
                 f"{name} dtype {arr.dtype} not supported. Use bfloat16 or float16."
             )

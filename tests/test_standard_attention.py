@@ -55,9 +55,8 @@ class TestCausalMask:
 
     def test_causal_first_query_unaffected(self, small_inputs):
         """
-        Query position 0 can only attend to key 0 in causal attention.
-        Its output should be identical to full attention when seq_kv=1,
-        and the same value as non-causal would produce for a 1-token context.
+        With a single-token KV context, causal == non-causal: the only
+        key position 0 can attend to (causal or not) is key 0 itself.
         """
         import jax
         import jax.numpy as jnp
@@ -65,10 +64,10 @@ class TestCausalMask:
 
         key = jax.random.PRNGKey(2)
         k1, k2, k3 = jax.random.split(key, 3)
-        # Single-position sequence: causal == non-causal
-        q = jax.random.normal(k1, (1, 1, 128, 128), dtype=jnp.bfloat16)
-        k = jax.random.normal(k2, (1, 1, 128, 128), dtype=jnp.bfloat16)
-        v = jax.random.normal(k3, (1, 1, 128, 128), dtype=jnp.bfloat16)
+        # seq=1 so causal masking is a no-op
+        q = jax.random.normal(k1, (1, 1, 1, 128), dtype=jnp.bfloat16)
+        k = jax.random.normal(k2, (1, 1, 1, 128), dtype=jnp.bfloat16)
+        v = jax.random.normal(k3, (1, 1, 1, 128), dtype=jnp.bfloat16)
 
         out_full = attention(q, k, v, causal=False)
         out_causal = attention(q, k, v, causal=True)
