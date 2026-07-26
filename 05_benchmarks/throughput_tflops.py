@@ -62,9 +62,20 @@ def attention_flop_count(
     causal: bool = False,
 ) -> int:
     """
-    Matmul FLOPs for one forward pass of attention.
+    Matmul FLOPs for one forward pass of attention (multiply-add = 2 FLOPs).
 
-    Uses the multiply-add = 2 FLOPs convention.
+    Two matmuls, each counted with the 2× multiply-add convention:
+      QK^T :  2 · batch · heads · seq_q · seq_kv · d_k
+      PV   :  2 · batch · heads · seq_q · seq_kv · d_v
+
+    When seq_q == seq_kv == S and d_k == d_v == d this simplifies to the
+    standard FA2 formula:
+      total = 4 · batch · heads · S² · d    (non-causal forward)
+
+    This is NOT the naive 2·S²·d figure (which omits the PV matmul).
+
+    Causal attention halves the cost because only the lower-triangular
+    portion of the S×S attention matrix is computed.
     """
     qkt_flops = 2 * batch * heads * seq_q * seq_kv * d_k
     pv_flops  = 2 * batch * heads * seq_q * seq_kv * d_v

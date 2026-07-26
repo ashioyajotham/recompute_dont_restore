@@ -94,6 +94,19 @@ def get_block_sizes(
     ):
         block_q = max(block_q // 2, MIN_BLOCK_SIZE)
 
+    # Guard: even the minimum block sizes exceed the budget.
+    # Returning silently would cause a cryptic kernel crash later; raise now
+    # so users on unusual TPU configs (large head_dim, tight VMEM) get a
+    # clear, actionable error with the exact byte counts.
+    final_usage = vmem_usage_bytes(block_q, block_kv, head_dim, dtype)
+    if final_usage > vmem_budget:
+        raise ValueError(
+            f"VMEM_BUDGET_EXCEEDED: minimum block sizes "
+            f"(block_q={block_q}, block_kv={block_kv}) require "
+            f"{final_usage:,} bytes but vmem_budget is {vmem_budget:,} bytes. "
+            f"Reduce head_dim or pass a larger vmem_budget."
+        )
+
     return BlockSizes(block_q=block_q, block_kv=block_kv)
 
 

@@ -98,13 +98,21 @@ Google's Splash Attention takes this further: for structured sparse patterns (sl
 
 ## Where to go from here
 
-The code in this repository is intentionally clear rather than maximally optimized. Known gaps relative to a production implementation:
+The code in this repository is intentionally clear rather than maximally optimized. Here is an honest map of what remains, ordered by impact.
 
-- The backward pass loads full-sequence Q/K/V tensors per kernel step, which creates VMEM pressure at very long sequences. A two-level tiling (block_q_major + block_q_minor) would eliminate this.
-- No multi-device (multi-slice) sharding. Production implementations use `jax.lax.psum` across device axes.
-- Block size selection (`utils.get_block_sizes`) uses simple heuristics. A profiler-guided tuning loop would find better values.
+**Two-level Q tiling (the biggest gap).** The backward pass currently loads full-sequence Q/K/V tensors per kernel step. At very long sequences (>32K tokens) this creates VMEM pressure even with small `block_kv`. The fix is a two-level tiling scheme: an outer `block_q_major` for the backward's KV loop, and an inner `block_q_minor` for the actual tile compute. JAX's reference implementation in `jax/experimental/pallas/ops/tpu/flash_attention.py` implements this — reading it alongside this codebase is the highest-leverage next step.
 
-The JAX reference implementation at `jax/experimental/pallas/ops/tpu/flash_attention.py` handles these cases and is worth reading alongside this code.
+**Multi-device sharding.** Everything here runs on a single chip. Production LLM training shards the head dimension across devices with `jax.lax.psum_scatter` for the output and `jax.lax.all_gather` for the KV tiles. The explicit VMEM model actually makes this cleaner than on GPU: you control exactly which KV tiles transit the inter-chip link.
+
+**Profiler-guided block size tuning.** `utils.get_block_sizes` uses static heuristics. A 30-line sweep over `(block_q, block_kv)` pairs — measuring wall-clock time with `jax.block_until_ready` and logging the result — will routinely find 10–20% better configurations for a specific (head_dim, dtype, TPU generation) triple. The XLA profiler (Xprof) shows whether the pipeline is actually compute-bound or DMA-bound.
+
+**Quantized and paged KV cache (inference).** For decode-time inference, KV caches are often stored in int8 or fp8 to reduce HBM bandwidth. The Pallas kernel can be extended to dequantize K and V inside the tile loop — the cost is essentially free because the dequantize is hidden behind the QK matmul latency. Paged KV caching (variable-length sequences sharing a fixed-size KV buffer pool) is implemented by making the `index_map` look up a page table rather than computing a linear offset.
+
+**Splash Attention for structured sparsity.** Google's [Splash Attention](https://github.com/google-deepmind/jax/blob/main/jax/experimental/pallas/ops/tpu/splash_attention/) extends the model further: for structured sparse patterns (sliding window, local+global, strided) it skips the DMA transfer entirely for tiles that are fully masked. The explicit VMEM ownership model makes this straightforward — if you own the DMA, you can simply not issue it.
+
+---
+
+The core insight in this codebase — *recompute cheaply, store sparingly* — is not specific to Flash Attention. It is the general principle behind activation checkpointing, rematerialization in JAX (`jax.remat`), and the broader trend of trading FLOPs (cheap, parallelizable) for HBM bandwidth (scarce, sequential). Flash Attention made this concrete at the operator level. The Pallas kernel model extends it to the tile level. Understanding both is the foundation for writing the next generation of custom TPU kernels.
 
 ---
 
@@ -115,9 +123,12 @@ The JAX reference implementation at `jax/experimental/pallas/ops/tpu/flash_atten
 3. Shazeer (2019). Fast Transformer Decoding: One Write-Head is All You Need.
 4. Ainslie et al. (2023). GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints.
 5. JAX Pallas documentation: https://jax.readthedocs.io/en/latest/pallas/
+6. JAX reference Flash Attention (TPU): `jax/experimental/pallas/ops/tpu/flash_attention.py`
+7. Google DeepMind Splash Attention: https://github.com/google-deepmind/jax/tree/main/jax/experimental/pallas/ops/tpu/splash_attention
 
 ---
 
 ## Acknowledgement
 
 Google Cloud credits are provided for this project. #TPUSprint
+
