@@ -291,9 +291,22 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
         mask_value=mask_value,
     )
 
-    # Reshape to merge batch+heads into the grid, treating full seq_q as one
-    # tile per KV-grid step. This avoids a second level of tiling for clarity.
-    # A production implementation would add an outer Q loop for long seq_q.
+    # VMEM LIMITATION: the dKV kernel loads all five full-sequence tensors
+    # (Q, dO, O as bfloat16; m, l as float32) into VMEM at once per KV-tile
+    # step.  With d_k=d_v=128 and the 8 MB conservative budget from utils.py:
+    #
+    #   VMEM = seq_q * (d_k*2 + d_v*2 + d_v*2 + 128*4 + 128*4)  bytes
+    #        = seq_q * (256 + 256 + 256 + 512 + 512)             bytes
+    #        = seq_q * 1792                                       bytes
+    #
+    #   seq_q=1024  ->  1.84 MB  (fits)
+    #   seq_q=4096  ->  7.34 MB  (fits, barely)
+    #   seq_q=8192  -> 14.68 MB  *** exceeds 8 MB budget -> spill or OOM ***
+    #
+    # This is not merely a "production concern" — it is a hard wall that
+    # triggers at seq_q >= 8K on any TPU v4 with standard d_k=128.
+    # The fix is two-level tiling: an outer q_major loop in the grid so that
+    # only block_q_major rows of Q are in VMEM at a time, matching the forward.
     dk, dv = pl.pallas_call(
         dkv_kernel,
         out_shape=[
@@ -354,6 +367,19 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
     # --- dQ via Pallas kernel ---
     # Grid: (batch, heads, q_tiles)
     # For each Q tile, loop over all KV tiles inside the kernel.
+    #
+    # VMEM LIMITATION: the dQ kernel loads full K and V sequences into VMEM
+    # once per Q-tile step.  With d_k=d_v=128 in bfloat16:
+    #
+    #   VMEM_KV = seq_kv * (d_k + d_v) * 2  bytes
+    #           = seq_kv * 512              bytes
+    #
+    #   seq_kv=16384 ->  8.39 MB  *** exceeds 8 MB budget ***
+    #   seq_kv=32768 -> 16.78 MB
+    #
+    # The dQ kernel is less aggressive than dKV (only 2 full-seq buffers vs 5),
+    # but still hits the wall at seq_kv >= 16K.  The same two-level tiling fix
+    # (outer kv_major loop in the grid) resolves both kernels consistently.
 
     dq_kernel = functools.partial(
         _flash_bwd_dq_kernel,
@@ -392,7 +418,7 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
                     block_shape=(block_q, d_v),
                     index_map=lambda b, h, i: (b, h, i, 0),
                 ),
-                # Full KV sequence per (b, h)
+                # Full KV sequence per (b, h) — see VMEM LIMITATION above.
                 pl.BlockSpec(
                     block_shape=(seq_kv, d_k),
                     index_map=lambda b, h, i: (b, h, 0, 0),
