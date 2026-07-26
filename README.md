@@ -250,10 +250,12 @@ known gaps:
 
 - **Single-device.** No multi-slice / multi-host sharding. A production
   implementation would `psum` across a model-parallel device axis.
-- **Backward kernel loads full-sequence Q, dO, O, m, l per KV tile.** This
-  works for the sequence lengths the project targets but creates VMEM pressure
-  at very long sequences. A two-level tiling
-  (`block_q_major + block_q_minor`) would resolve it.
+- **Backward dKV kernel loads all of Q, dO, O, m, l as a single VMEM block
+  per KV-tile step.** At `d_k=128` / `bfloat16` this is `seq_q × 1792 bytes`;
+  the 8 MB VMEM budget is exceeded at **seq_q ≥ 8 192** (14.7 MB required).
+  The dQ kernel likewise loads full K and V: budget exceeded at **seq_kv ≥ 16 384**
+  (8.4 MB). The fix is two-level tiling (`block_q_major + block_q_minor` in the
+  grid), which keeps only one major block in VMEM at a time.
 - **Block-size heuristic is hand-tuned.** `utils.get_block_sizes` chooses based
   on sequence length and a fixed VMEM budget; a profiler-guided autotuner would
   do better.
