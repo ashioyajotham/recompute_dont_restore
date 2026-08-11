@@ -31,7 +31,13 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from utils import MIN_BLOCK_SIZE, BlockSizes, get_block_sizes, validate_shapes
+from utils import (
+    MIN_BLOCK_SIZE,
+    BlockSizes,
+    get_block_sizes,
+    pallas_interpret_mode,
+    validate_shapes,
+)
 
 
 def _flash_fwd_kernel(
@@ -114,7 +120,7 @@ def _flash_fwd_kernel(
 
     # Unnormalized weights for this tile: exp(logits - m_next)
     # Broadcast m_next from (block_q, MIN_BLOCK_SIZE) -> (block_q, block_kv)
-    m_next_for_logits = jnp.broadcast_to(m_curr, logits.shape)
+    m_next_for_logits = jnp.broadcast_to(m_next[:, :1], logits.shape)
     p = jnp.exp(logits - m_next_for_logits)   # (block_q, block_kv)
 
     # Rescaling factor for previously accumulated values
@@ -215,17 +221,17 @@ def flash_attention_forward(
             in_specs=[
                 # Q: indexed by q_tile, constant over kv_tile
                 pl.BlockSpec(
-                    block_shape=(block_q, d_k),
+                    block_shape=(None, None, block_q, d_k),
                     index_map=lambda b, h, i, j: (b, h, i, 0),
                 ),
                 # K: indexed by kv_tile, constant over q_tile
                 pl.BlockSpec(
-                    block_shape=(block_kv, d_k),
+                    block_shape=(None, None, block_kv, d_k),
                     index_map=lambda b, h, i, j: (b, h, j, 0),
                 ),
                 # V: indexed by kv_tile, constant over q_tile
                 pl.BlockSpec(
-                    block_shape=(block_kv, d_v),
+                    block_shape=(None, None, block_kv, d_v),
                     index_map=lambda b, h, i, j: (b, h, j, 0),
                 ),
             ],
@@ -233,15 +239,15 @@ def flash_attention_forward(
                 # O, m, l: indexed by q_tile only — all kv_tiles map to same
                 # location; we guard writes with pl.when(kv_tile == last).
                 pl.BlockSpec(
-                    block_shape=(block_q, d_v),
+                    block_shape=(None, None, block_q, d_v),
                     index_map=lambda b, h, i, j: (b, h, i, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_q, MIN_BLOCK_SIZE),
+                    block_shape=(None, None, block_q, MIN_BLOCK_SIZE),
                     index_map=lambda b, h, i, j: (b, h, i, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_q, MIN_BLOCK_SIZE),
+                    block_shape=(None, None, block_q, MIN_BLOCK_SIZE),
                     index_map=lambda b, h, i, j: (b, h, i, 0),
                 ),
             ],
@@ -260,6 +266,7 @@ def flash_attention_forward(
                 "arbitrary",  # kv_tiles — sequential: online softmax state
             )
         ),
+        interpret=pallas_interpret_mode(),
     )(q, k, v)
 
     return o, m, l

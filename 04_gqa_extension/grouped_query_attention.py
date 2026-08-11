@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "03_pallas_kernels"))
 
-from utils import MIN_BLOCK_SIZE, BlockSizes, get_block_sizes
+from utils import MIN_BLOCK_SIZE, BlockSizes, get_block_sizes, pallas_interpret_mode
 # Import the kernel directly — GQA uses _flash_fwd_kernel unchanged.
 from flash_fwd import _flash_fwd_kernel
 
@@ -117,32 +117,32 @@ def grouped_query_attention(
             in_specs=[
                 # Q: indexed by q_head h, q_tile i — identical to MHA.
                 pl.BlockSpec(
-                    block_shape=(block_q, d_k),
+                    block_shape=(None, None, block_q, d_k),
                     index_map=lambda b, h, i, j: (b, h, i, 0),
                 ),
                 # K: GQA mapping — h // groups selects the KV head.
                 # This single lambda is the complete GQA extension point.
                 pl.BlockSpec(
-                    block_shape=(block_kv, d_k),
+                    block_shape=(None, None, block_kv, d_k),
                     index_map=lambda b, h, i, j: (b, h // groups, j, 0),
                 ),
                 # V: same GQA mapping as K.
                 pl.BlockSpec(
-                    block_shape=(block_kv, d_v),
+                    block_shape=(None, None, block_kv, d_v),
                     index_map=lambda b, h, i, j: (b, h // groups, j, 0),
                 ),
             ],
             out_specs=[
                 pl.BlockSpec(
-                    block_shape=(block_q, d_v),
+                    block_shape=(None, None, block_q, d_v),
                     index_map=lambda b, h, i, j: (b, h, i, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_q, MIN_BLOCK_SIZE),
+                    block_shape=(None, None, block_q, MIN_BLOCK_SIZE),
                     index_map=lambda b, h, i, j: (b, h, i, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_q, MIN_BLOCK_SIZE),
+                    block_shape=(None, None, block_q, MIN_BLOCK_SIZE),
                     index_map=lambda b, h, i, j: (b, h, i, 0),
                 ),
             ],
@@ -157,6 +157,7 @@ def grouped_query_attention(
                 "parallel", "parallel", "parallel", "arbitrary"
             )
         ),
+        interpret=pallas_interpret_mode(),
     )(q, k, v)
 
     return o

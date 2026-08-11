@@ -10,12 +10,20 @@ TPU hardware constraints:
 """
 
 import math
+import os
 from typing import NamedTuple
 
 import jax.numpy as jnp
 
 # Hardware constant: TPU TensorCore minimum tile dimension along any axis.
 MIN_BLOCK_SIZE: int = 128
+
+
+def pallas_interpret_mode() -> bool:
+    """Return whether CPU-safe Pallas interpreter execution was requested."""
+    return os.environ.get("JAX_INTERPRET_PALLAS", "").lower() in {
+        "1", "true", "yes", "on"
+    }
 
 # Conservative VMEM budget per kernel invocation (bytes).
 # True VMEM capacity is ~16 MB on v4, but we leave headroom for temporaries.

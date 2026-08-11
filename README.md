@@ -171,6 +171,15 @@ On a TPU Colab runtime (`Runtime -> Change runtime type -> TPU`):
 !SKIP_DRIVE=1 bash run_colab.sh          # don't mount Drive (results stay in VM)
 ```
 
+### Native Cloud TPU VM
+
+On a freshly provisioned TPU VM:
+
+```bash
+bash run_tpu_vm.sh
+TPU_VERSION=v5e SKIP_BENCH=1 bash run_tpu_vm.sh
+```
+
 What runs: `jax[tpu]` install, TPU device check, the full `pytest -v` suite
 (`flash_fwd` and the Pallas GQA kernel are now exercised), a `flash_fwd` vs
 naive smoke test at `S = 512` with `max_abs_diff < 5e-2`, the three benchmark

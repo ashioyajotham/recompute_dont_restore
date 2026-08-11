@@ -39,7 +39,7 @@ from utils import get_block_sizes
 # Peak bfloat16 TFLOP/s per chip (single-chip, not pod)
 TPU_PEAK_TFLOPS: dict[str, float] = {
     "v4":  275.0,
-    "v5e": 393.0,
+    "v5e": 197.0,
     "v5p": 459.0,
 }
 
@@ -60,6 +60,7 @@ def attention_flop_count(
     d_k: int,
     d_v: int,
     causal: bool = False,
+    useful_causal: bool = False,
 ) -> int:
     """
     Matmul FLOPs for one forward pass of attention (multiply-add = 2 FLOPs).
@@ -74,14 +75,14 @@ def attention_flop_count(
 
     This is NOT the naive 2·S²·d figure (which omits the PV matmul).
 
-    Causal attention halves the cost because only the lower-triangular
-    portion of the S×S attention matrix is computed.
+    useful_causal halves the algorithmic FLOP count. The current Pallas
+    kernel still executes every tile and masks future positions, so hardware
+    throughput and MFU must use the full executed count.
     """
     qkt_flops = 2 * batch * heads * seq_q * seq_kv * d_k
     pv_flops  = 2 * batch * heads * seq_q * seq_kv * d_v
     total = qkt_flops + pv_flops
-    if causal:
-        # Only the lower triangle is computed; roughly half the operations.
+    if causal and useful_causal:
         total //= 2
     return total
 
