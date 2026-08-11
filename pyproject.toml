@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recompute-dont-restore"
+version = "0.1.0"
+description = "Pedagogical Flash Attention kernels for JAX Pallas on TPU"
+requires-python = ">=3.10"
+dependencies = ["jax>=0.4.25", "numpy>=1.24"]
+
+[tool.setuptools]
+package-dir = {"" = "03_pallas_kernels"}
+py-modules = ["flash_fwd", "flash_bwd", "utils", "recompute_dont_restore"]

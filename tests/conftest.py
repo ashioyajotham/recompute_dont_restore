@@ -33,6 +33,8 @@ useful for logic checks:
 See individual fixture docstrings for shape rationale.
 """
 
+import os
+
 import pytest
 
 
@@ -53,6 +55,9 @@ def _tpu_available() -> bool:
 
 JAX_AVAILABLE = _jax_available()
 TPU_AVAILABLE = _tpu_available()
+PALLAS_INTERPRET = os.environ.get("JAX_INTERPRET_PALLAS", "").lower() in {
+    "1", "true", "yes", "on"
+}
 
 
 def pytest_configure(config):
@@ -67,7 +72,7 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "jax" in item.keywords and not JAX_AVAILABLE:
             item.add_marker(skip_jax)
-        if "tpu" in item.keywords and not TPU_AVAILABLE:
+        if "tpu" in item.keywords and not (TPU_AVAILABLE or PALLAS_INTERPRET):
             item.add_marker(skip_tpu)
 
 

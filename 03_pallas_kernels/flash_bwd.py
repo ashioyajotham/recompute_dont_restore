@@ -34,7 +34,13 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from utils import MIN_BLOCK_SIZE, BlockSizes, get_block_sizes, validate_shapes
+from utils import (
+    MIN_BLOCK_SIZE,
+    BlockSizes,
+    get_block_sizes,
+    pallas_interpret_mode,
+    validate_shapes,
+)
 from flash_fwd import flash_attention_forward
 
 
@@ -319,42 +325,42 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
             in_specs=[
                 # Full Q sequence per (b, h) — loaded once per kv_tile step
                 pl.BlockSpec(
-                    block_shape=(seq_q, d_k),
+                    block_shape=(None, None, seq_q, d_k),
                     index_map=lambda b, h, j: (b, h, 0, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(seq_q, d_v),
+                    block_shape=(None, None, seq_q, d_v),
                     index_map=lambda b, h, j: (b, h, 0, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(seq_q, d_v),
+                    block_shape=(None, None, seq_q, d_v),
                     index_map=lambda b, h, j: (b, h, 0, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(seq_q, MIN_BLOCK_SIZE),
+                    block_shape=(None, None, seq_q, MIN_BLOCK_SIZE),
                     index_map=lambda b, h, j: (b, h, 0, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(seq_q, MIN_BLOCK_SIZE),
+                    block_shape=(None, None, seq_q, MIN_BLOCK_SIZE),
                     index_map=lambda b, h, j: (b, h, 0, 0),
                 ),
                 # KV tile
                 pl.BlockSpec(
-                    block_shape=(block_kv, d_k),
+                    block_shape=(None, None, block_kv, d_k),
                     index_map=lambda b, h, j: (b, h, j, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_kv, d_v),
+                    block_shape=(None, None, block_kv, d_v),
                     index_map=lambda b, h, j: (b, h, j, 0),
                 ),
             ],
             out_specs=[
                 pl.BlockSpec(
-                    block_shape=(block_kv, d_k),
+                    block_shape=(None, None, block_kv, d_k),
                     index_map=lambda b, h, j: (b, h, j, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_kv, d_v),
+                    block_shape=(None, None, block_kv, d_v),
                     index_map=lambda b, h, j: (b, h, j, 0),
                 ),
             ],
@@ -362,6 +368,7 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
         compiler_params=pltpu.CompilerParams(
             dimension_semantics=("parallel", "parallel", "parallel")
         ),
+        interpret=pallas_interpret_mode(),
     )(q, do, o, m, l, k, v)
 
     # --- dQ via Pallas kernel ---
@@ -391,7 +398,7 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
         mask_value=mask_value,
     )
 
-    dq = pl.pallas_call(
+    (dq,) = pl.pallas_call(
         dq_kernel,
         out_shape=[jax.ShapeDtypeStruct(q.shape, q.dtype)],
         grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -399,38 +406,38 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
             grid=(batch, heads, num_q_tiles),
             in_specs=[
                 pl.BlockSpec(
-                    block_shape=(block_q, d_k),
+                    block_shape=(None, None, block_q, d_k),
                     index_map=lambda b, h, i: (b, h, i, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_q, d_v),
+                    block_shape=(None, None, block_q, d_v),
                     index_map=lambda b, h, i: (b, h, i, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_q, MIN_BLOCK_SIZE),
+                    block_shape=(None, None, block_q, MIN_BLOCK_SIZE),
                     index_map=lambda b, h, i: (b, h, i, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_q, MIN_BLOCK_SIZE),
+                    block_shape=(None, None, block_q, MIN_BLOCK_SIZE),
                     index_map=lambda b, h, i: (b, h, i, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(block_q, d_v),
+                    block_shape=(None, None, block_q, d_v),
                     index_map=lambda b, h, i: (b, h, i, 0),
                 ),
                 # Full KV sequence per (b, h) — see VMEM LIMITATION above.
                 pl.BlockSpec(
-                    block_shape=(seq_kv, d_k),
+                    block_shape=(None, None, seq_kv, d_k),
                     index_map=lambda b, h, i: (b, h, 0, 0),
                 ),
                 pl.BlockSpec(
-                    block_shape=(seq_kv, d_v),
+                    block_shape=(None, None, seq_kv, d_v),
                     index_map=lambda b, h, i: (b, h, 0, 0),
                 ),
             ],
             out_specs=[
                 pl.BlockSpec(
-                    block_shape=(block_q, d_k),
+                    block_shape=(None, None, block_q, d_k),
                     index_map=lambda b, h, i: (b, h, i, 0),
                 ),
             ],
@@ -438,9 +445,27 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
         compiler_params=pltpu.CompilerParams(
             dimension_semantics=("parallel", "parallel", "parallel")
         ),
+        interpret=pallas_interpret_mode(),
     )(q, do, m, l, o, k, v)
 
     return dq, dk, dv
+
+
+def flash_attention_backward(
+    q: jnp.ndarray,
+    k: jnp.ndarray,
+    v: jnp.ndarray,
+    o: jnp.ndarray,
+    m: jnp.ndarray,
+    l: jnp.ndarray,
+    do: jnp.ndarray,
+    *,
+    causal: bool = False,
+    sm_scale: Optional[float] = None,
+    block_sizes: Optional[BlockSizes] = None,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Public array-to-array launch API for the recomputing backward kernels."""
+    return _bwd(causal, sm_scale, block_sizes, (q, k, v, o, m, l), do)
 
 
 flash_attention.defvjp(_fwd, _bwd)

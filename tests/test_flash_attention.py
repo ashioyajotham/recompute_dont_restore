@@ -42,6 +42,28 @@ class TestFlashForwardVsNaive:
 
         np.testing.assert_allclose(o_flash, o_naive, atol=ATOL_BF16)
 
+    def test_decreasing_tile_max_regression(self):
+        """A later lower-max KV tile must remain on the running-max scale."""
+        import jax.numpy as jnp
+        from flash_fwd import flash_attention_forward
+        from utils import BlockSizes
+
+        shape = (1, 1, 256, 128)
+        q = jnp.ones(shape, dtype=jnp.bfloat16)
+        k = jnp.concatenate(
+            [jnp.ones((1, 1, 128, 128)), jnp.zeros((1, 1, 128, 128))],
+            axis=2,
+        ).astype(jnp.bfloat16)
+        v = jnp.concatenate(
+            [jnp.ones((1, 1, 128, 128)), jnp.full((1, 1, 128, 128), 100.0)],
+            axis=2,
+        ).astype(jnp.bfloat16)
+
+        out, _, _ = flash_attention_forward(
+            q, k, v, block_sizes=BlockSizes(128, 128)
+        )
+        np.testing.assert_allclose(np.asarray(out, dtype=np.float32), 1.0, atol=5e-2)
+
     def test_output_matches_causal(self, small_inputs):
         import jax.numpy as jnp
         from standard_attention import attention as naive
