@@ -104,7 +104,7 @@ step that you can read or run independently.
 | `06_splash_attention_comparison/` | Comparison with Google's Splash Attention: where TPU-native sparse-mask kernels diverge from a port of Flash | CPU |
 | `tests/` | Tiered pytest suite: pure-NumPy algorithm oracle, CPU-JAX correctness, TPU-Pallas kernel verification | CPU + TPU |
 | `scripts/` | Helper scripts called by the launchers (e.g. `local_smoke_test.py`) | CPU |
-| `docs/` | Long-form documents: project plan (`CLAUDE.md`), TPU/GPU intuition blog post (`blog_post.md`) | — |
+| `docs/` | Long-form documents: kernel API (`kernel_api.md`), project plan (`CLAUDE.md`), TPU/GPU intuition blog post (`blog_post.md`) | — |
 | `run_local.ps1`, `run_colab.sh` | One-shot launchers for the two execution paths (see Quick start) | Windows / Colab |
 
 The split between code (`02_…` / `03_…`), measurement (`05_…`) and prose
@@ -276,6 +276,10 @@ the above and is the intended reference for production use.
 ---
 
 ## Background reading
+
+For the supported downstream import surface, tensor shapes, forward/backward
+residual contract, and static configuration requirements, see
+[`docs/kernel_api.md`](docs/kernel_api.md).
 
 For the proposal-style overview of the project (objectives, deliverables,
 section-by-section guide), see [`docs/CLAUDE.md`](docs/CLAUDE.md).
