@@ -181,7 +181,9 @@ dq, dk, dv = flash_attention_backward(
 `get_block_sizes(seq_len, head_dim, dtype)` provides a conservative heuristic
 using an 8 MiB VMEM budget. It returns 128-, 256-, or 512-element sequence
 tiles, reducing them when the estimated forward working set would exceed that
-budget.
+budget. This is a project-chosen safety margin, not the physical VMEM capacity
+or a backward-kernel allocation check; v5e has 128 MiB VMEM per TensorCore.
+See the [JAX TPU hardware reference](https://docs.jax.dev/en/latest/pallas/tpu/hardware.html).
 
 The selector receives one sequence length. The default forward path passes
 `seq_q`, so for cross-attention (`seq_q != seq_kv`) callers must verify that the
@@ -201,10 +203,13 @@ the API does not apply an offset automatically.
 - TPU execution uses Pallas TPU primitives and is single-device.
 - Shapes and configuration are static for the demonstrated compiled paths.
 - The backward dKV kernel loads full-sequence `q`, `do`, `o`, `m`, and `l`
-  buffers for each KV tile. At `d_k = d_v = 128` in BF16, the documented 8 MiB
-  VMEM budget is exceeded at `seq_q >= 8192`.
-- The dQ kernel loads the full K and V sequences and reaches the same budget at
-  `seq_kv >= 16384` for `d_k = d_v = 128` in BF16.
+  blocks for each KV tile. At `d_k = d_v = 128` in BF16, their input footprint
+  exceeds the project's conservative 8 MiB selector budget at `seq_q = 8192`.
+- The dQ kernel loads full K and V sequence blocks; their input footprint
+  reaches 8 MiB at `seq_kv = 16384` for `d_k = d_v = 128` in BF16.
+- Neither figure is a demonstrated spill/OOM threshold. The selector estimates
+  forward tiles only, and actual backward allocation includes compiler-managed
+  buffers and temporaries. Longer lengths need a separate TPU validation.
 - The repository does not promise sharding, ragged sequence lengths, dropout,
   FP8/int8 inputs, or production-level autotuning.
 

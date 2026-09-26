@@ -10,7 +10,9 @@ FLOP count convention (standard, matching LLM literature):
     PV:    2 * B * H * Sq * Skv * dv
     Total: 4 * B * H * S^2 * d  (when Sq = Skv = S, dk = dv = d)
 
-  Causal: halve the attention matrix ops (triangular computation).
+  Causal: triangular FLOPs are a useful-work estimate. This implementation
+  still visits all tiles and masks future positions; its executed matmul
+  count is not halved by the causal flag.
 
 MFU = achieved TFLOP/s / peak TFLOP/s of the device.
 

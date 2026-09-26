@@ -6,10 +6,10 @@ Algorithm summary (per Q tile):
     1. Compute logits = Q_i @ K_j^T * scale           (block_q x block_kv)
     2. Update running max:  m_new = max(m_prev, rowmax(logits))
     3. Compute unnorm weights: P = exp(logits - m_new) (block_q x block_kv)
-    4. Rescale prev acc:    O_acc = exp(m_prev - m_new) * O_acc
+    4. Rescale prev acc:    acc = exp(m_prev - m_new) * acc
     5. Update norm:         l_new = exp(m_prev - m_new) * l_prev + rowsum(P)
-    6. Accumulate:          O_acc += P @ V_j / l_new
-  Output: O_i = O_acc, saved (m, l) for backward recomputation.
+    6. Accumulate:          acc += P @ V_j
+  Output: O_i = acc / l_final, saved (m, l) for backward recomputation.
 
 Memory: O(seq * d) instead of O(seq^2).
   The attention matrix is never written to HBM. VMEM holds only the active

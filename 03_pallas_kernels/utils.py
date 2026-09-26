@@ -2,10 +2,10 @@
 Block size selection and shape validation for Pallas flash attention kernels.
 
 TPU hardware constraints:
-- The TensorCore minimum tile dimension is 128. Every block dimension along
-  the sequence axis must be a multiple of 128.
-- VMEM (scratchpad) is ~16 MB per TensorCore on TPU v4. Exceeding it causes
-  spilling to HBM, defeating the purpose of tiling.
+- This implementation supports sequence blocks in multiples of 128, matching
+  its Pallas layouts and shape validation; this is not a universal TPU limit.
+- VMEM capacity varies by TPU generation. This module uses a conservative
+  8 MiB forward-tile estimate, not a physical limit or spill prediction.
 - Input dtype must be bfloat16 or float16; accumulators are always float32.
 """
 
@@ -15,7 +15,7 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-# Hardware constant: TPU TensorCore minimum tile dimension along any axis.
+# Project-supported sequence tile size; not a universal hardware minimum.
 MIN_BLOCK_SIZE: int = 128
 
 
@@ -25,9 +25,10 @@ def pallas_interpret_mode() -> bool:
         "1", "true", "yes", "on"
     }
 
-# Conservative VMEM budget per kernel invocation (bytes).
-# True VMEM capacity is ~16 MB on v4, but we leave headroom for temporaries.
-DEFAULT_VMEM_BUDGET: int = 8 * 1024 * 1024  # 8 MB
+# Conservative forward-tile selection budget (bytes). Actual VMEM capacities
+# and compiler-managed buffering vary by TPU generation. This does not check
+# the backward kernels' full-sequence blocks.
+DEFAULT_VMEM_BUDGET: int = 8 * 1024 * 1024  # 8 MiB
 
 
 class BlockSizes(NamedTuple):
@@ -71,7 +72,7 @@ def get_block_sizes(
     vmem_budget: int = DEFAULT_VMEM_BUDGET,
 ) -> BlockSizes:
     """
-    Select block sizes that fit within VMEM.
+    Select block sizes within this project's forward-tile estimate.
 
     Strategy:
       1. Start from a sequence-length-dependent initial guess.
@@ -103,9 +104,8 @@ def get_block_sizes(
         block_q = max(block_q // 2, MIN_BLOCK_SIZE)
 
     # Guard: even the minimum block sizes exceed the budget.
-    # Returning silently would cause a cryptic kernel crash later; raise now
-    # so users on unusual TPU configs (large head_dim, tight VMEM) get a
-    # clear, actionable error with the exact byte counts.
+    # Raise with exact estimate and configured budget. This check alone cannot
+    # predict compilation success or actual VMEM use on a given TPU.
     final_usage = vmem_usage_bytes(block_q, block_kv, head_dim, dtype)
     if final_usage > vmem_budget:
         raise ValueError(

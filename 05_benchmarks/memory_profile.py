@@ -1,13 +1,12 @@
 """
-HBM peak memory comparison: naive attention vs flash attention.
+Analytical memory model and backend counters for two attention paths.
 
-Two measurement approaches:
-  1. Theoretical: analytical formula for peak HBM per method.
-     Naive:  O(n^2) — attention matrix dominates.
-     Flash:  O(n)   — attention matrix never materialized.
-  2. Runtime: jax device memory stats before/after execution.
-     This measures working set delta, not strict peak, but is a useful
-     lower bound on real allocation.
+Two reporting approaches:
+  1. Analytical: Q/K/V/O plus one modeled attention matrix (naive), or
+     padded forward m/l statistics (flash). This is not measured peak HBM.
+  2. Backend counters: JAX device memory stats when available. A reported
+     peak may be process-global; a before/after delta is not a strict peak.
+     Neither should be interpreted as per-operation memory savings.
 
 Usage:
     python 05_benchmarks/memory_profile.py
@@ -44,7 +43,7 @@ def theoretical_naive_peak(
     d_k: int,
     dtype: jnp.dtype,
 ) -> int:
-    """Peak HBM for naive attention (bytes). Dominated by the attention matrix."""
+    """Simplified tensor-footprint model for naive attention, in bytes."""
     itemsize = jnp.dtype(dtype).itemsize
     qkvo = 4 * batch * heads * seq_len * d_k * itemsize
     attn = attention_matrix_bytes(seq_len, heads, batch, dtype)
@@ -60,13 +59,13 @@ def theoretical_flash_peak(
     block_sizes=None,
 ) -> int:
     """
-    Peak HBM for flash attention (bytes).
+    Simplified tensor-footprint model for flash forward, in bytes.
 
     Q, K, V, O:   4 * batch * heads * seq_len * d_k * itemsize
     m, l:         2 * batch * heads * seq_len * 128 * 4  (float32)
 
-    The attention matrix term (O(n^2)) is absent — it lives in VMEM only,
-    tiled across the KV loop.
+    The full attention matrix is absent. This model excludes temporary and
+    compiler-managed buffers and is not a measured peak allocation.
     """
     itemsize = jnp.dtype(dtype).itemsize
     qkvo = 4 * batch * heads * seq_len * d_k * itemsize
@@ -77,22 +76,25 @@ def theoretical_flash_peak(
 
 def runtime_memory_delta(fn, *args) -> int:
     """
-    Working set delta in bytes using JAX device memory stats.
+    Backend-reported bytes from JAX device memory stats, if available.
 
-    Note: this is the delta between before and after the call, not the strict
-    peak. For tight peak measurement, use jax.profiler.trace and read the
-    profiler output.
+    Depending on the backend this returns a process-wide peak counter or a
+    before/after allocation delta. Neither isolates the call's true peak;
+    -1 means unavailable. A dedicated profiler experiment is required before
+    claiming measured per-operation memory savings.
     """
     device = jax.local_devices()[0]
     try:
         stats_before = device.memory_stats()
         jax.block_until_ready(fn(*args))
         stats_after = device.memory_stats()
-        # peak_bytes_in_use is more accurate than bytes_in_use delta
+        # This counter may include earlier calls and warmups in the process.
         peak_key = "peak_bytes_in_use"
         if peak_key in stats_after:
             return stats_after[peak_key]
-        return stats_after.get("bytes_in_use", 0) - stats_before.get("bytes_in_use", 0)
+        if "bytes_in_use" in stats_before and "bytes_in_use" in stats_after:
+            return stats_after["bytes_in_use"] - stats_before["bytes_in_use"]
+        return -1
     except Exception:
         # memory_stats() may not be available on all backends
         return -1
@@ -133,8 +135,8 @@ def run_memory_sweep(
     records = []
 
     header = (
-        f"{'seq':>6}  {'naive_theory_GB':>16}  {'flash_theory_GB':>16}  "
-        f"{'ratio':>7}  {'naive_runtime_GB':>17}  {'flash_runtime_GB':>17}"
+        f"{'seq':>6}  {'naive_model_GB':>16}  {'flash_model_GB':>16}  "
+        f"{'model_ratio':>11}  {'naive_counter_GB':>17}  {'flash_counter_GB':>17}"
     )
     print(header)
     print("-" * len(header))
@@ -163,9 +165,12 @@ def run_memory_sweep(
             print(f"{seq_len:>6}  flash OOM/error: {e}")
             flash_rt = -1
 
+        naive_counter = f"{naive_rt/1e9:.3f}" if naive_rt >= 0 else "N/A"
+        flash_counter = f"{flash_rt/1e9:.3f}" if flash_rt >= 0 else "N/A"
+        model_ratio = f"{ratio:.1f}x"
         print(
             f"{seq_len:>6}  {naive_theory/1e9:>16.3f}  {flash_theory/1e9:>16.3f}  "
-            f"{ratio:>7.1f}x  {naive_rt/1e9:>17.3f}  {flash_rt/1e9:>17.3f}"
+            f"{model_ratio:>11}  {naive_counter:>17}  {flash_counter:>17}"
         )
 
         records.append({
@@ -194,11 +199,11 @@ def plot_results(records: list[dict], out_path="05_benchmarks/results/memory.png
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
 
-    ax1.plot(seq_lens, naive_gb, "o-", label="Naive (theoretical)")
-    ax1.plot(seq_lens, flash_gb, "s-", label="Flash (theoretical)")
+    ax1.plot(seq_lens, naive_gb, "o-", label="Naive (model)")
+    ax1.plot(seq_lens, flash_gb, "s-", label="Flash (model)")
     ax1.set_xlabel("Sequence length")
-    ax1.set_ylabel("Peak HBM (GB)")
-    ax1.set_title("HBM usage: naive vs flash")
+    ax1.set_ylabel("Modeled tensor footprint (GB)")
+    ax1.set_title("Analytical tensor footprint")
     ax1.set_xscale("log", base=2)
     ax1.set_yscale("log")
     ax1.legend()
@@ -207,7 +212,7 @@ def plot_results(records: list[dict], out_path="05_benchmarks/results/memory.png
     ax2.plot(seq_lens, ratios, "o-", color="red")
     ax2.set_xlabel("Sequence length")
     ax2.set_ylabel("Memory ratio (naive / flash)")
-    ax2.set_title("Memory savings factor")
+    ax2.set_title("Model ratio (not measured savings)")
     ax2.set_xscale("log", base=2)
     ax2.grid(True, alpha=0.3)
     ax2.axhline(1.0, color="gray", linestyle="--", alpha=0.5)

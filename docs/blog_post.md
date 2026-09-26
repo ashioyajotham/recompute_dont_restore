@@ -10,29 +10,41 @@ Standard attention materializes a full $(S \times S)$ attention weight matrix in
 
 Flash Attention's solution: never write that matrix to HBM. Tile the computation across fast memory, accumulating the softmax and output simultaneously. The backward pass recomputes the attention weights from Q, K, V and a small set of saved statistics, rather than loading a stored activation.
 
-The result: O(n) HBM usage instead of O(n²), with the same exact output.
+The algorithm avoids an O(n²) stored attention matrix, though actual peak
+memory depends on the implementation and compiler. Floating-point results
+need not be bitwise identical to a separately compiled naive kernel.
 
 ---
 
 ## What changes on TPU
 
-Flash Attention was built around GPU SRAM caches and CUDA's memory hierarchy. TPUs are different in three ways that matter:
+Flash Attention was originally developed for GPU memory hierarchies. GPU
+shared memory is also explicitly managed; this Pallas implementation differs
+in its TPU memory spaces, layout requirements, and pipeline declarations:
 
 **1. VMEM is a scratchpad, not a cache.**
 
-On a GPU, the programmer hints at cache behavior but doesn't control it. On a TPU, VMEM (the vector scratchpad) is explicitly managed. You decide what goes in and out. This is both more work and more power: you can guarantee that your KV tiles live in fast memory, not get evicted by an unrelated operation.
+On TPU, VMEM is a vector scratchpad rather than a cache. Pallas `BlockSpec`s
+describe staged input tiles, while scratch shapes reserve VMEM for state.
+Actual allocation and transfer behavior remains subject to compilation.
 
 In Pallas, this is expressed via `pltpu.VMEM(shape, dtype)` scratch shapes. The flash attention kernel allocates three VMEM tensors — the running max `m`, the running normalizer `l`, and the output accumulator `acc` — and explicitly manages their lifecycle across KV tile iterations.
 
-**2. The systolic array layout imposes a 128-element minimum tile dimension.**
+**2. Tile layout constrains shapes.**
 
-The TPU TensorCore processes tiles in multiples of 128 elements. Smaller tiles create padding overhead or fail to compile. This is why all block sizes in the implementation are multiples of 128 (`MIN_BLOCK_SIZE = 128`), and why the `m` and `l` statistics have shape `(block_q, 128)` rather than `(block_q, 1)` — a scalar per row can't be represented efficiently in the vector tile layout.
+This implementation chooses sequence tiles in multiples of 128
+(`MIN_BLOCK_SIZE = 128`) and pads `m` and `l` to `(block_q, 128)` for its TPU
+vector layout. These choices should not be read as universal minimum tile
+dimensions. See the [Pallas TPU restrictions](https://docs.jax.dev/en/latest/pallas/tpu/details.html).
 
-**3. Mosaic's dimension semantics replace CUDA's explicit sync primitives.**
+**3. Mosaic uses declared grid dependencies.**
 
-In CUDA Flash Attention, the programmer uses `__syncthreads()` to coordinate tile loads and compute. In Mosaic (the compiler behind Pallas on TPU), you declare *what* the data dependencies are (`dimension_semantics`), and the compiler handles pipelining.
+The Pallas grid declares `dimension_semantics` so Mosaic can account for
+dependencies while scheduling data movement and computation.
 
-The kv-tile axis gets `"arbitrary"` semantics — meaning tiles must be processed in order, with each tile's online softmax state depending on the previous. Setting this correctly is what enables Mosaic to pipeline the next KV tile's DMA transfer while computing on the current tile.
+The KV-tile axis gets `"arbitrary"` semantics because each tile consumes the
+previous tile's online-softmax state. The current run did not profile whether
+Mosaic actually overlapped the next DMA transfer with computation.
 
 ---
 
@@ -52,7 +64,7 @@ At the end of all KV tiles, $O$ is the correct normalized attention output. The 
 
 ## The backward pass: recomputation over storage
 
-The forward pass saves two O(n) tensors per attention layer: the per-row running max $m$ and normalizer $l$. These encode the log-sum-exp without storing the attention weights.
+The forward pass saves two O(n) tensors per attention layer: the per-row running max $m$ and normalizer $l$. This implementation pads their trailing dimension to 128, so its constant factor is substantial even though their sequence-length scaling is linear.
 
 During the backward pass, instead of loading a stored O(n²) attention matrix, we recompute:
 
@@ -60,7 +72,10 @@ $$P_{ij} = \frac{\exp(S_{ij} - m_i)}{l_i}$$
 
 using Q, K, V (already needed for the backward anyway) and the saved (m, l). The backward kernel structure mirrors the forward: loop over KV tiles for each Q tile, recomputing P on the fly.
 
-This is the memory saving that matters for training: the activation memory between forward and backward is O(n), not O(n²). For a 32K-token sequence with 32 layers, the difference is measured in hundreds of GB.
+This is the intended training-memory advantage: stored attention auxiliaries
+scale linearly, not quadratically, with sequence length. This project has not
+measured a per-operation peak-HBM reduction or validated a 32K-token,
+32-layer training workload.
 
 ---
 
@@ -86,13 +101,18 @@ The grid still runs over `num_q_heads` for the head dimension. Multiple Q-head t
 
 ## TPU vs GPU: the deeper intuition shift
 
-GPU Flash Attention optimizes *access patterns* to be SRAM-friendly. You're working with caches — you can't control them directly, but you can arrange computation to reuse data before it's evicted.
+Both GPU and TPU Flash Attention implementations reason about on-chip storage
+and data movement. Here, Pallas exposes TPU VMEM and grid-dependency
+declarations directly. Whether Mosaic overlaps DMA prefetch with tile compute
+is a profiling question, not something the declarations alone establish.
 
-TPU Pallas kernels optimize *explicit data movement*. You decide what's in VMEM at each step. The Mosaic compiler can then pipeline the DMA prefetch for tile $j+1$ while computing on tile $j$ — but only if you've declared the dependency structure correctly via `dimension_semantics`.
+The practical implication for this implementation is to check tile and
+backward-staging footprints, validate the online-softmax dependencies, and
+profile the generated TPU work before attributing latency to memory transfer.
 
-The practical implication: TPU kernel debugging involves reasoning about the VMEM budget explicitly (how big can `block_q` be before VMEM pressure?) and about the pipeline structure (is the `"arbitrary"` dimension placed correctly?). On GPU, these concerns are implicit.
-
-Google's Splash Attention takes this further: for structured sparse patterns (sliding window, local+global), it skips DMA transfers entirely for masked tiles — something the explicit VMEM model makes straightforward to express.
+Structured-sparsity implementations such as Splash Attention can avoid work
+on fully masked tiles. This repository's causal path does not do that; it
+visits every KV tile and masks future positions inside the tile.
 
 ---
 
@@ -100,15 +120,28 @@ Google's Splash Attention takes this further: for structured sparse patterns (sl
 
 The code in this repository is intentionally clear rather than maximally optimized. Here is an honest map of what remains, ordered by impact.
 
-**Two-level Q tiling (the biggest gap).** The backward pass currently loads full-sequence Q/K/V tensors per kernel step. At very long sequences (>32K tokens) this creates VMEM pressure even with small `block_kv`. The fix is a two-level tiling scheme: an outer `block_q_major` for the backward's KV loop, and an inner `block_q_minor` for the actual tile compute. JAX's reference implementation in `jax/experimental/pallas/ops/tpu/flash_attention.py` implements this — reading it alongside this codebase is the highest-leverage next step.
+**Bounded backward staging.** The backward kernels currently declare
+full-sequence input blocks. Their footprint grows with sequence length;
+the repository's 8 MiB heuristic is not a hardware failure threshold.
+Two-level tiling is a candidate design, but has not been implemented or
+validated here. Compare it with JAX's Pallas attention implementations.
 
-**Multi-device sharding.** Everything here runs on a single chip. Production LLM training shards the head dimension across devices with `jax.lax.psum_scatter` for the output and `jax.lax.all_gather` for the KV tiles. The explicit VMEM model actually makes this cleaner than on GPU: you control exactly which KV tiles transit the inter-chip link.
+**Multi-device sharding.** The validated path uses one chip. Distributing
+heads or sequence blocks across devices would require a separate design,
+collective-communication contract, and correctness/performance evaluation.
 
-**Profiler-guided block size tuning.** `utils.get_block_sizes` uses static heuristics. A 30-line sweep over `(block_q, block_kv)` pairs — measuring wall-clock time with `jax.block_until_ready` and logging the result — will routinely find 10–20% better configurations for a specific (head_dim, dtype, TPU generation) triple. The XLA profiler (Xprof) shows whether the pipeline is actually compute-bound or DMA-bound.
+**Profiler-guided block size tuning.** `utils.get_block_sizes` uses static
+heuristics. A controlled sweep over valid `(block_q, block_kv)` pairs could
+test whether another configuration improves latency; no improvement percentage
+has been measured. A TPU profiler trace is needed to identify compute,
+transfer, or scheduling bottlenecks.
 
-**Quantized and paged KV cache (inference).** For decode-time inference, KV caches are often stored in int8 or fp8 to reduce HBM bandwidth. The Pallas kernel can be extended to dequantize K and V inside the tile loop — the cost is essentially free because the dequantize is hidden behind the QK matmul latency. Paged KV caching (variable-length sequences sharing a fixed-size KV buffer pool) is implemented by making the `index_map` look up a page table rather than computing a linear offset.
+**Quantized and paged KV cache (inference).** These are possible future
+extensions, not features of this repository. Quantization and page-table
+lookup introduce costs and correctness requirements that would need separate
+implementation and measurement.
 
-**Splash Attention for structured sparsity.** Google's [Splash Attention](https://github.com/google-deepmind/jax/blob/main/jax/experimental/pallas/ops/tpu/splash_attention/) extends the model further: for structured sparse patterns (sliding window, local+global, strided) it skips the DMA transfer entirely for tiles that are fully masked. The explicit VMEM ownership model makes this straightforward — if you own the DMA, you can simply not issue it.
+**Splash Attention for structured sparsity.** Google's [Splash Attention](https://github.com/google-deepmind/jax/blob/main/jax/experimental/pallas/ops/tpu/splash_attention/) is a separate reference for structured masks. Avoiding work for fully masked tiles would require a different scheduling and indexing design here, followed by correctness and performance checks.
 
 ---
 
@@ -131,4 +164,3 @@ The core insight in this codebase — *recompute cheaply, store sparingly* — i
 ## Acknowledgement
 
 Google Cloud credits are provided for this project. #TPUSprint
-

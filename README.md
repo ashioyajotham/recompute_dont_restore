@@ -26,8 +26,12 @@ dimension semantics directly.
 The codebase covers the full arc: motivation, algorithmic derivation, a naive
 JAX baseline as the correctness oracle, forward and backward Pallas kernels with
 the recomputation trick, a Grouped Query Attention extension, and a benchmark
-suite measuring memory savings, throughput, and Model FLOP Utilization (MFU)
-against TPU v4 / v5e / v5p peaks.
+suite modeling theoretical memory use and reporting throughput and Model FLOP
+Utilization (MFU) against selected TPU peaks. Runtime memory counters are
+backend-dependent; analytical memory alone does not demonstrate measured
+savings. In the [2026-09-26 native v5e validation](docs/native_validation_status.md),
+the tested kernels passed correctness checks but this pedagogical Pallas
+implementation was slower than the naive JAX reference at S=4096.
 
 ---
 
@@ -52,8 +56,9 @@ Flash Attention's contribution is the observation that this matrix never needs
 to exist as a tensor: softmax can be computed incrementally across tiles
 provided you carry a per-row running maximum, and the backward pass can
 *recompute* the weights from `Q, K, V` and a small set of saved log-sum-exp
-statistics. Activation memory drops from `O(S²)` to `O(S)` while keeping the
-output exact.
+statistics. The algorithm avoids storing the quadratic attention matrix and
+retains linear-in-sequence auxiliary state; floating-point outputs still have
+implementation-dependent numerical error.
 
 ---
 
@@ -62,26 +67,23 @@ output exact.
 Three properties of TPU silicon force a different kernel structure than GPU
 Flash Attention assumes:
 
-1. **VMEM is a programmer-managed scratchpad, not a cache.** GPU SRAM is
-   implicit — you arrange access patterns and hope. On TPU, you decide what
-   tensor lives in VMEM at every step (`pltpu.VMEM(shape, dtype)`), and you pay
-   directly for going over budget. The flash kernel here allocates three VMEM
-   scratch tensors (`m`, `l`, `acc`) and explicitly carries them across KV
-   tiles.
+1. **VMEM is an explicit scratchpad.** Pallas `BlockSpec`s stage input tiles
+   from HBM, and `pltpu.VMEM` declares scratch storage. This kernel carries
+   three scratch tensors (`m`, `l`, `acc`) across KV tiles. GPU kernels can
+   also manage on-chip shared memory explicitly; the difference here is the
+   TPU/Pallas memory and compilation model, not that GPUs lack scratchpads.
 
-2. **The systolic array imposes a 128-element minimum tile dimension.** The
-   TensorCore processes blocks in multiples of 128. This is why every block
-   size in the implementation is a multiple of 128 (`MIN_BLOCK_SIZE = 128`),
-   and why `m` and `l` are stored with shape `(block_q, 128)` rather than
-   `(block_q, 1)` — a row-scalar cannot be efficiently tiled in the vector
-   layout.
+2. **Tile layout constrains shapes.** This implementation chooses sequence
+   tiles in multiples of 128 (`MIN_BLOCK_SIZE = 128`) and stores `m` and `l`
+   with a padded trailing dimension of 128. These are implementation choices
+   compatible with its TPU vector layout, not a universal minimum tile size
+   on every axis. See the [Pallas TPU restrictions](https://docs.jax.dev/en/latest/pallas/tpu/details.html).
 
-3. **Mosaic replaces explicit synchronization with declared semantics.** GPU
-   Flash Attention uses `__syncthreads()` to coordinate tile loads. In Pallas,
-   you instead declare `dimension_semantics` per grid axis. The KV-tile axis is
-   `"arbitrary"` — Mosaic now knows tiles must be processed in order and can
-   pipeline the next tile's DMA while the current one computes. Get this wrong
-   and either correctness breaks or pipelining vanishes.
+3. **The KV loop has a declared ordering dependency.** The forward grid marks
+   its KV-tile axis `"arbitrary"` because successive tiles update shared
+   online-softmax state. Mosaic can pipeline memory transfers around declared
+   dependencies, but this run did not profile whether transfer and compute
+   overlapped effectively.
 
 A longer write-up of these tradeoffs lives in
 [`docs/blog_post.md`](docs/blog_post.md).
@@ -121,15 +123,17 @@ Concretely, what you get on top of "read the FlashAttention paper":
    recomputation trick written in roughly 250 + 200 lines, heavily commented,
    wired together via `jax.custom_vjp`.
 2. **A NumPy oracle for the tiling math** (`tests/test_online_softmax.py`) that
-   you can read line-by-line against the kernel — if both pass, the algorithm
-   is right and any kernel bug is a TPU-specific issue (indexing, VMEM
-   lifecycle), not a math bug.
+   you can read line-by-line against the kernel. Passing it supports the
+   online-softmax math, but does not rule out untested shapes or kernel bugs.
 3. **A working GQA kernel** that demonstrates the *minimal* extension: only
    the `index_map` for K/V changes (`h -> h // groups`); the kernel body is
-   unchanged. GQA-on-Pallas is essentially a dispatch-layer concern.
-4. **A benchmark harness** that records both theoretical peak HBM (analytical
-   formula) and runtime memory (via `device.memory_stats()`), TFLOP/s and MFU
-   parameterized by TPU generation, and an xprof capture path.
+   unchanged. This repository's GQA validation is forward-only; it does not
+   establish a GQA training path.
+4. **A benchmark harness** that reports an analytical tensor-footprint model,
+   optional runtime memory counters where supported, TFLOP/s and MFU by TPU
+   generation, and an xprof capture path. Runtime counters are not always
+   true per-operation peaks and should not be equated with the analytical
+   estimates.
 5. **A reproducible split** between the parts of the project that can be
    reviewed and tested without TPU access (math, naive attention, online
    softmax oracle, shape/dtype validators) and the parts that genuinely need
@@ -139,10 +143,10 @@ Concretely, what you get on top of "read the FlashAttention paper":
 
 ## Quick start
 
-The repository runs along two execution paths. They are deliberately disjoint:
-**local** does everything that does not need a TPU; **Colab** does everything
-that does. See the section [Local vs Colab — what runs where](#local-vs-colab--what-runs-where)
-below for the details.
+The repository has CPU, Colab TPU, and native Cloud TPU VM paths. See
+[Local vs Colab — what runs where](#local-vs-colab--what-runs-where) below for
+the environment requirements; the same TPU-marked tests also run on a native
+TPU VM.
 
 ### Local (Windows / CPU)
 
@@ -180,11 +184,15 @@ bash run_tpu_vm.sh
 TPU_VERSION=v5e SKIP_BENCH=1 bash run_tpu_vm.sh
 ```
 
-What runs: `jax[tpu]` install, TPU device check, the full `pytest -v` suite
-(`flash_fwd` and the Pallas GQA kernel are now exercised), a `flash_fwd` vs
-naive smoke test at `S = 512` with `max_abs_diff < 5e-2`, the three benchmark
-sweeps, and a Drive copy of `05_benchmarks/results/<timestamp>/` so the
-artifacts survive the runtime.
+What runs: a new `.venv`, unpinned `jax[tpu]` installation, the TPU-marked test
+slice, and, unless `SKIP_BENCH=1`, the memory-profile and throughput scripts.
+This launcher does **not** run the full test suite, the naive baseline sweep,
+or a Drive upload. It does not archive results; copy them off the VM before
+deleting it. For the pinned, bounded native validation and its evidence
+boundary, TPU topology, estimated cost, results, and shutdown record, see
+[the native validation audit](docs/native_validation_status.md). That run
+reused a four-chip v5e VM while benchmarking on one chip; the allocated
+four-chip slice, not just the active chip, drives the compute estimate.
 
 ### Manual invocations (for the impatient)
 
@@ -219,12 +227,13 @@ actually exercise.
 | `tests/test_flash_attention.py` | skipped | **yes** | Requires `pltpu.VMEM`, `PrefetchScalarGridSpec` |
 | `tests/test_gqa.py::TestGQAKernelVsReference` | skipped | **yes** | Same — Pallas TPU primitives |
 | `flash_fwd.py` / `flash_bwd.py` (kernel dispatch) | import-only | **yes** | TPU-only Pallas calls |
-| `05_benchmarks/memory_profile.py` | imports flash → fails | **yes** | Measures the contribution |
-| `05_benchmarks/throughput_tflops.py` | imports flash → fails | **yes** | Same |
+| `05_benchmarks/memory_profile.py` | imports flash → fails | **yes** | Reports an analytical model and backend counters, not isolated peak HBM |
+| `05_benchmarks/throughput_tflops.py` | imports flash → fails | **yes** | Reports throughput under an explicit FLOP convention |
 
-The local script gives you everything in the first six rows; the Colab script
-gives you all rows. There is no environment that gives you a partial Pallas
-run: either you have TPU primitives or you don't.
+The local script covers the CPU rows; the Colab and native TPU environments
+can exercise the TPU rows. Individual tests and benchmark scripts can still
+fail independently, so use the saved test and result reports to establish
+which components passed.
 
 ---
 
@@ -238,7 +247,7 @@ The benchmark scripts emit JSON (raw) and PNG (plot) under
 # 1. Baseline latency + theoretical naive HBM, S in {512, 1K, …, 32K}
 python 02_naive_jax_baseline/benchmark_baseline.py --plot
 
-# 2. Naive vs flash peak HBM (theoretical + runtime), S up to 16K
+# 2. Analytical memory model plus backend-dependent allocation counters
 python 05_benchmarks/memory_profile.py --plot
 
 # 3. Throughput in TFLOP/s and MFU, parameterized by TPU generation
@@ -259,19 +268,24 @@ known gaps:
 
 - **Single-device.** No multi-slice / multi-host sharding. A production
   implementation would `psum` across a model-parallel device axis.
-- **Backward dKV kernel loads all of Q, dO, O, m, l as a single VMEM block
-  per KV-tile step.** At `d_k=128` / `bfloat16` this is `seq_q × 1792 bytes`;
-  the 8 MB VMEM budget is exceeded at **seq_q ≥ 8 192** (14.7 MB required).
-  The dQ kernel likewise loads full K and V: budget exceeded at **seq_kv ≥ 16 384**
-  (8.4 MB). The fix is two-level tiling (`block_q_major + block_q_minor` in the
-  grid), which keeps only one major block in VMEM at a time.
+- **Backward kernels stage full-sequence inputs in VMEM.** The dKV input
+  blocks scale as `seq_q × 1792 bytes` at `d_k=d_v=128` / `bfloat16`; the dQ
+  K/V blocks scale as `seq_kv × 512 bytes`. They exceed this repository's
+  *conservative 8 MiB selection budget* at S=8192 for dKV; dQ reaches that
+  budget at S=16384 and exceeds it at longer lengths.
+  That budget is not the TPU's physical capacity: v5e has 128 MiB VMEM per
+  TensorCore. Neither threshold is a measured OOM boundary. Two-level tiling
+  would remove the full-sequence staging and is a candidate for future work.
+  See [the JAX TPU hardware reference](https://docs.jax.dev/en/latest/pallas/tpu/hardware.html).
 - **Block-size heuristic is hand-tuned.** `utils.get_block_sizes` chooses based
   on sequence length and a fixed VMEM budget; a profiler-guided autotuner would
   do better.
 - **No FP8 / int8 path.** Inputs are restricted to `bfloat16` or `float16`.
 
-Google's `jax/experimental/pallas/ops/tpu/flash_attention.py` handles all of
-the above and is the intended reference for production use.
+JAX's `jax/experimental/pallas/ops/tpu/flash_attention.py` is a useful
+implementation reference; this repository makes no production-performance
+claim. The [native validation audit](docs/native_validation_status.md) records
+the tested scope, observed slowdown, and estimated run cost.
 
 ---
 

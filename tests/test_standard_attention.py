@@ -159,7 +159,11 @@ class TestAttentionProperties:
         q = jnp.array(Q_np[None, None])  # (1, 1, seq, d)
         k = jnp.array(K_np[None, None])
         v = jnp.array(V_np[None, None])
-        out = np.array(attention(q, k, v), dtype=np.float32)[0, 0]
+        # TPU's default float32 dot precision may use lower-precision inputs.
+        # Scope the higher precision to this NumPy comparison: setting it for
+        # the whole suite changes Pallas matmuls and can prevent compilation.
+        with jax.default_matmul_precision("highest"):
+            out = np.array(attention(q, k, v), dtype=np.float32)[0, 0]
 
         np.testing.assert_allclose(out, ref, atol=1e-4)
 

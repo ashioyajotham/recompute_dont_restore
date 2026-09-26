@@ -297,22 +297,23 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
         mask_value=mask_value,
     )
 
-    # VMEM LIMITATION: the dKV kernel loads all five full-sequence tensors
-    # (Q, dO, O as bfloat16; m, l as float32) into VMEM at once per KV-tile
-    # step.  With d_k=d_v=128 and the 8 MB conservative budget from utils.py:
+    # VMEM PRESSURE RISK: the dKV kernel declares full-sequence input blocks
+    # (Q, dO, O as bfloat16; m, l as float32) for each KV tile. With
+    # d_k=d_v=128, their input footprint is:
     #
     #   VMEM = seq_q * (d_k*2 + d_v*2 + d_v*2 + 128*4 + 128*4)  bytes
     #        = seq_q * (256 + 256 + 256 + 512 + 512)             bytes
     #        = seq_q * 1792                                       bytes
     #
-    #   seq_q=1024  ->  1.84 MB  (fits)
-    #   seq_q=4096  ->  7.34 MB  (fits, barely)
-    #   seq_q=8192  -> 14.68 MB  *** exceeds 8 MB budget -> spill or OOM ***
+    #   seq_q=1024  ->  1.75 MiB
+    #   seq_q=4096  ->  7.00 MiB
+    #   seq_q=8192  -> 14.00 MiB  (above our conservative 8 MiB selector budget)
     #
-    # This is not merely a "production concern" — it is a hard wall that
-    # triggers at seq_q >= 8K on any TPU v4 with standard d_k=128.
-    # The fix is two-level tiling: an outer q_major loop in the grid so that
-    # only block_q_major rows of Q are in VMEM at a time, matching the forward.
+    # The 8 MiB budget in utils.py estimates forward tiles; it is not a
+    # physical VMEM limit or a measured backward OOM threshold. Other
+    # compiler-managed buffers and temporaries also consume VMEM. Two-level
+    # tiling is a candidate to bound full-sequence staging, but has not been
+    # implemented or performance-tested here.
     dk, dv = pl.pallas_call(
         dkv_kernel,
         out_shape=[
@@ -375,18 +376,18 @@ def _bwd(causal, sm_scale, block_sizes, residuals, do):
     # Grid: (batch, heads, q_tiles)
     # For each Q tile, loop over all KV tiles inside the kernel.
     #
-    # VMEM LIMITATION: the dQ kernel loads full K and V sequences into VMEM
-    # once per Q-tile step.  With d_k=d_v=128 in bfloat16:
+    # VMEM PRESSURE RISK: the dQ kernel declares full K and V sequence blocks
+    # for each Q tile. With d_k=d_v=128 in bfloat16:
     #
     #   VMEM_KV = seq_kv * (d_k + d_v) * 2  bytes
     #           = seq_kv * 512              bytes
     #
-    #   seq_kv=16384 ->  8.39 MB  *** exceeds 8 MB budget ***
-    #   seq_kv=32768 -> 16.78 MB
+    #   seq_kv=16384 ->  8 MiB (equal to our forward-selector budget)
+    #   seq_kv=32768 -> 16 MiB
     #
-    # The dQ kernel is less aggressive than dKV (only 2 full-seq buffers vs 5),
-    # but still hits the wall at seq_kv >= 16K.  The same two-level tiling fix
-    # (outer kv_major loop in the grid) resolves both kernels consistently.
+    # This is not a measured hardware wall. The dQ kernel stages two
+    # full-sequence inputs instead of five; a bounded two-level tiling design
+    # could reduce that footprint, pending correctness and profiling.
 
     dq_kernel = functools.partial(
         _flash_bwd_dq_kernel,
