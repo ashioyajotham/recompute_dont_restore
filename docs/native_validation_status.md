@@ -93,6 +93,28 @@ No backward-only latency is inferred by subtracting medians, and no
 unsupported runtime memory-saving or MFU claim is made. Compilation-inclusive
 first calls, p95s, and raw trial samples are retained in the archive.
 
+The [offline aggregate](native_benchmark_analysis.md) reports every case's
+per-process p50 range, paired Pallas/naive ratio, p95 median, and first-call
+host time. Its [JSON companion](native_benchmark_aggregate.json) contains
+median/min/max summaries without raw trials or local filesystem paths. Both
+are reproducible from the three archived benchmark JSON reports using the
+CPU-only [summarizer](../scripts/summarize_native_benchmark.py); no TPU rerun
+was needed. The fixed order of the four methods remains a design limitation.
+After verifying and extracting the private archive, regenerate into an empty
+output directory from the repository root:
+
+```bash
+python scripts/summarize_native_benchmark.py \
+  results/benchmark-rep1.json results/benchmark-rep2.json results/benchmark-rep3.json \
+  --archive-sha256 489797e795f50c8d3d1804bcb3e5c521365879a1fc068f5e3f7943470c9267a1 \
+  --json-out summary/aggregate.json --markdown-out summary/analysis.md
+```
+
+The summarizer validates each report's case grid, timing samples, and
+environment consistency. Its `--archive-sha256` argument records a hash;
+verify the archive separately before extraction. It refuses to overwrite
+existing summary outputs.
+
 The source offers plausible explanations, not a measured bottleneck ranking:
 the forward path processes every KV tile even for causal attention and masks
 future positions rather than skipping whole tiles; it uses 128×128 Pallas

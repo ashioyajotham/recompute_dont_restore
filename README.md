@@ -193,6 +193,8 @@ boundary, TPU topology, estimated cost, results, and shutdown record, see
 [the native validation audit](docs/native_validation_status.md). That run
 reused a four-chip v5e VM while benchmarking on one chip; the allocated
 four-chip slice, not just the active chip, drives the compute estimate.
+The archived timing sweep also has a [CPU-only per-case aggregate](docs/native_benchmark_analysis.md)
+with an explicit variability and first-call analysis.
 
 ### Manual invocations (for the impatient)
 
