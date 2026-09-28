@@ -11,6 +11,7 @@ build/
 # Profiler output
 /tmp/xprof*/
 *.pb
+artifacts/profiles/
 
 # Benchmark results (pre-generated results are committed, new runs are not)
 05_benchmarks/results/*.json

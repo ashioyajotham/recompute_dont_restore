@@ -195,6 +195,9 @@ reused a four-chip v5e VM while benchmarking on one chip; the allocated
 four-chip slice, not just the active chip, drives the compute estimate.
 The archived timing sweep also has a [CPU-only per-case aggregate](docs/native_benchmark_analysis.md)
 with an explicit variability and first-call analysis.
+The [2026-09-28 TPU profiler follow-up](docs/native_profile_report.md) confirms
+a device-execution gap at S=4096, but the Pallas custom call remains opaque;
+no specific internal bottleneck or kernel optimization is claimed.
 
 ### Manual invocations (for the impatient)
 
@@ -257,9 +260,8 @@ python 05_benchmarks/throughput_tflops.py --tpu v5e --plot
 python 05_benchmarks/throughput_tflops.py --tpu v5p --causal --plot
 ```
 
-For an annotated walkthrough of capturing and reading xprof traces (what good
-TPU utilization looks like, where the bottleneck shows up if it isn't matmul),
-see [`05_benchmarks/xprof_guide.md`](05_benchmarks/xprof_guide.md).
+For the bounded capture protocol and its attribution limits, see
+[`05_benchmarks/xprof_guide.md`](05_benchmarks/xprof_guide.md).
 
 ---
 

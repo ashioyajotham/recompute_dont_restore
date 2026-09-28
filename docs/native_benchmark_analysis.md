@@ -40,4 +40,4 @@ The following are medians of the three per-process p95s and first-call host wall
 - The S=4096 slowdown persists across all three repetitions for both masks and both complete call types. At S=256, differences are small relative to the host-dispatch timing floor.
 - These are sequential, fixed-order host wall timings: naive forward, Pallas forward, naive forward+backward, Pallas forward+backward. They are not device-only timings; order and cache effects were not controlled.
 - Do not subtract medians to infer backward-only time. No per-operation peak-HBM, FLOP utilization, or causal executed-work reduction was measured.
-- Next paid experiment, if warranted: profile matched S=1024 and S=4096 cases with synchronized device traces and counterbalanced method order before changing kernel logic.
+- A [bounded profiler follow-up](native_profile_report.md) captured S=1024 and S=4096 with counterbalanced method order. It confirms a device-execution gap, but the Pallas custom call is opaque in that trace and does not yet identify the internal bottleneck.

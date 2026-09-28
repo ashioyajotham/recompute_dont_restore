@@ -1,91 +1,89 @@
-# xprof Guide for Flash Attention Kernels
+# Profiling the native JAX/Pallas attention kernels
 
-This guide covers capturing and interpreting xprof traces for the Pallas
-kernels in this project.
+The [offline validation](../docs/native_benchmark_analysis.md) found that the
+tested Pallas kernel is slower than the naive JAX implementation at S=4096.
+Those numbers are synchronized **host wall times**, not TPU device traces.
+Profiling is the next diagnostic step; none of the possible bottlenecks below
+has yet been established by a trace.
 
-## Capturing a trace
+## Prepared bounded experiment
 
-```python
-import jax
-from pathlib import Path
-
-profile_dir = "/tmp/xprof_flash_attention"
-Path(profile_dir).mkdir(parents=True, exist_ok=True)
-
-with jax.profiler.trace(profile_dir):
-    jax.block_until_ready(flash_attention_forward(q, k, v))
-```
-
-Then open in TensorBoard:
+`scripts/profile_tpu_cases.py` is a CPU-safe planner and a TPU-only capture
+harness. It does **not** start or stop the VM. First inspect its four-process
+schedule without importing JAX or creating files:
 
 ```bash
-tensorboard --logdir /tmp/xprof_flash_attention
+python scripts/profile_tpu_cases.py --dry-run
 ```
 
-Navigate to the **Profile** tab -> **Trace Viewer**.
+Only after a separate approval to start billable compute, verify the VM is
+stopped, configure an external auto-stop safeguard, and create an isolated
+environment with JAX/JAXLIB 0.9.2, libtpu 0.0.37, and NumPy 2.5.3 before
+running from the repository root. JAX 0.9.2 declares `libtpu==0.0.37.*` for
+its TPU extra; the earlier benchmark's libtpu 0.0.46 could execute kernels
+but crashed at profiler startup with a plugin API-size mismatch. Do not mix
+latency numbers from those two software stacks without labeling them:
 
-## What to look for
-
-### Well-utilized TPU
-
-- `MXU` (Matrix Unit) tiles appear dense and continuous with minimal gaps
-- `HBM` reads appear in bursts matching the KV tile prefetch pattern
-- The `DMA` channel shows the KV tile load overlapping with the previous tile's
-  compute — this is Mosaic's pipeline prefetching at work
-
-### Pathological patterns
-
-| Pattern | Likely cause |
-|---|---|
-| MXU bubbles (gaps between tiles) | `dimension_semantics` wrong — Mosaic can't pipeline |
-| VMEM pressure / spills | Block sizes too large; reduce via `get_block_sizes()` |
-| Sequential HBM reads (no overlap) | Missing or wrong `dimension_semantics="arbitrary"` on KV axis |
-| Very short MXU ops | Block sizes too small; tiles below `MIN_BLOCK_SIZE=128` |
-
-## Reading the op names
-
-In the trace viewer, Pallas ops appear under names like:
-
-```
-flash_fwd_kernel[b=0,h=0,q_tile=0,kv_tile=3]
+```bash
+python scripts/profile_tpu_cases.py \
+  --output-dir artifacts/profiles/native-v5e-<unique-run-id> \
+  --max-seconds 1080
 ```
 
-The `kv_tile` index increments sequentially within a fixed `(b, h, q_tile)`.
-You should see the `DMA load K/V` for tile `j+1` overlapping with the `MXU`
-compute for tile `j`.
+Choose a new output directory. `artifacts/profiles/` is gitignored; raw
+traces, manifests, and logs may contain local paths and should remain private.
+The controller ceiling is **not** a VM shutdown mechanism or a cost guarantee.
+The four-chip slice continues billing while READY, even if the harness exits;
+verify an external stop timer and confirm the VM reaches STOPPED afterward.
+Before a paid run, check the current [Cloud TPU price list](https://cloud.google.com/tpu/pricing)
+and available credits. The prior `us-south1` on-demand v5e rate was
+US$1.416/chip-hour, or US$5.664/hour for four chips.
 
-## Memory timeline
+The harness uses BF16 B1/H1/D128, seed 0, 128×128 blocks, S=1024 and 4096,
+noncausal. It profiles naive and Pallas forward and complete
+forward-plus-backward loss/gradient calls. Each sequence length runs twice,
+once naive-first and once Pallas-first, in fresh processes. Before a trace,
+all four methods pass the output/gradient check (`atol=rtol=0.05`) and each
+method completes five warmups. Ten unprofiled synchronized calls estimate
+its call time; five annotated trace batches then target about 100 ms each,
+capped at 500 calls per batch. Traced time is **not** a replacement for the
+unprofiled latency benchmark. There is no isolated backward-only call.
 
-In the **Memory Profile** sub-tab:
-- Naive attention: the allocation line jumps sharply at the point the full
-  attention matrix `(batch, heads, seq, seq)` is materialized
-- Flash attention: no such jump — allocation stays flat across the KV loop
+JAX captures compute-and-sync TPU traces and requests performance counters.
+Unsupported trace options or no identifiable TPU activity cause a visible
+failure, retaining partial private artifacts. A nonempty trace and an
+automated event heuristic do **not** certify useful device attribution; XProf
+review is mandatory before interpreting results. The manifest records the
+Git revision and dirty flag, source hashes, package versions, fixture, method
+order, correctness errors, baseline samples, trace hashes, and completion status.
 
-## Compute utilization numbers
+## Review in XProf
 
-From the **Overview** page, read:
-- **TPU idle time**: should be < 5% for well-tuned kernels
-- **Infeed/outfeed time**: HBM transfer time; high values indicate memory-bound
-  operation (expected at small sequence lengths)
+After capture, point a locally secured XProf or TensorBoard instance at the
+private run directory. Inspect the TPU device lanes, not just host annotations;
+confirm that each of the four method traces contains the expected calls and
+that counters or op breakdowns are present. JAX documents both
+[`start_trace`/`stop_trace`](https://docs.jax.dev/en/latest/profiling.html)
+and the [XProf trace viewer](https://docs.jax.dev/en/latest/profiling.html#xprof-tensorboard-profiling).
 
-## Correlating with benchmark numbers
+Use the traces to test, rather than assume, these hypotheses:
 
-If your MFU (from `throughput_tflops.py`) is low:
+| Question | Evidence to seek | Caution |
+| --- | --- | --- |
+| Is the Pallas forward path waiting on K/V movement? | Device DMA timeline and gaps adjacent to MXU work | `num_scalar_prefetch=0` describes SMEM scalar inputs, not K/V double-buffering. `dimension_semantics="arbitrary"` expresses a dependency, not guaranteed overlap. |
+| What precision and work does the MXU actually execute? | Compiled op types, MXU utilization, and device compute timeline | Source-level float32 casts do not alone prove FP32 MXU execution or conversion cost. |
+| Does padded `m/l` state dominate VPU work? | Vector/transcendental op breakdown and, if available, compiled IR | A 128-wide source expression does not prove 128× physical exponentials; compilation may simplify broadcasts. |
+| Is backward staging or slicing expensive? | Compare complete forward+backward traces with forward traces, inspect backward op timeline | Do not subtract p50s to claim isolated backward latency; profile attribution may remain ambiguous. |
 
-1. Check the trace for MXU bubbles — fix with correct `dimension_semantics`
-2. Check VMEM spills — fix with smaller block sizes
-3. Check if the kernel is HBM-bandwidth bound rather than compute-bound —
-   this is expected at seq < 2048; at longer sequences the kernel should
-   become compute-bound
+The similar causal and noncausal slowdown in the archived benchmark suggests
+a shared problem; it does not establish that skipping fully masked causal
+tiles would have no benefit. The 32 MiB BF16 matrix arithmetic size at S=4096
+also does not show whether XLA materializes an attention matrix or how it
+fuses the naive JAX implementation. If the trace cannot answer a question,
+record it as inconclusive and plan a narrower controlled experiment before
+changing kernel logic.
 
-## Comparing naive vs flash in the same trace
-
-```python
-with jax.profiler.trace(profile_dir):
-    jax.block_until_ready(naive_attention(q, k, v))
-    jax.block_until_ready(flash_attention_forward(q, k, v))
-```
-
-In the trace viewer, the naive attention op will show a single large allocation
-and compute block. The flash attention op will show many smaller, pipelined
-compute blocks.
+The [2026-09-28 capture report](../docs/native_profile_report.md) records the
+completed four-process run. Its device traces confirm the slowdown, but XProf
+represents the Pallas kernel as an opaque custom call: the requested counters
+did not yield an internal MXU/DMA/VPU breakdown, and LLO data was absent.
