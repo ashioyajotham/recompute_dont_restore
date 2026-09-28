@@ -198,6 +198,8 @@ with an explicit variability and first-call analysis.
 The [2026-09-28 TPU profiler follow-up](docs/native_profile_report.md) confirms
 a device-execution gap at S=4096, but the Pallas custom call remains opaque;
 no specific internal bottleneck or kernel optimization is claimed.
+The [matched-stack LLO follow-up](docs/native_llo_followup.md) is prepared but
+has not been run; it requires separate approval before any billable TPU work.
 
 ### Manual invocations (for the impatient)
 

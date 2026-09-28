@@ -104,3 +104,5 @@ documents the newer prerequisites and pre-import LLO flags. A changed stack
 must be labeled separately and rechecked for correctness and timing; an
 unavailable LLO view is a valid stopping condition, not a reason to infer a
 specific bottleneck.
+The [matched-stack LLO follow-up procedure](native_llo_followup.md) is now
+prepared; it has not yet been run or authorized for billable TPU time.
