@@ -2,8 +2,10 @@
 
 The [2026-09-28 profile](native_profile_report.md) measured an approximately
 8× S=4096 forward gap in XProf TPU XLA-module duration, but its Pallas
-`CustomCall` was opaque. This follow-up is **prepared, not yet run**. It
-does not alter the kernel, start/stop a VM, or authorize cloud spend.
+`CustomCall` was opaque. The debug-info follow-up has now run; see the
+[capture and offline review](native_llo_capture_report.md). The procedure
+below documents its controls and the separate runtime-tracing option. It
+does not authorize another VM start or kernel change.
 
 ## Interpretation to carry forward
 
